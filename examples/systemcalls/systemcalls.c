@@ -1,4 +1,10 @@
 #include "systemcalls.h"
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <stdarg.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <fcntl.h>
 
 /**
  * @param cmd the command to execute with system()
@@ -16,8 +22,19 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
+    int status = system(cmd);
 
-    return true;
+    if (status == -1) {
+        /* system() itself failed (e.g. fork/exec error) */
+        return false;
+    }
+
+    /* Check that the child terminated normally and returned exit code 0 */
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        return true;
+    }
+
+    return false;
 }
 
 /**
@@ -58,10 +75,38 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
+    /* Validate arguments: must have at least the path to execute */
+    if (count < 1) {
+        va_end(args);
+        return false;
+    }
 
+    pid_t pid = fork();
+    if (pid < 0) {
+        /* fork failed */
+        va_end(args);
+        return false;
+    } else if (pid == 0) {
+        /* Child: replace process image with provided command
+         * execv expects argv[0] to be the program name/path and argv to be a
+         * NULL-terminated array that includes argv[0]. Pass `command` directly.
+         */
+        execv(command[0], command);
+        /* On execv failure, _exit to avoid flushing stdio buffers copied
+         * from the parent and avoid running parent exit handlers. */
+        _exit(EXIT_FAILURE);
+    }
+
+    /* Parent: wait for the child to finish and return whether it succeeded */
+    int status;
+    if (waitpid(pid, &status, 0) == -1) {
+        va_end(args);
+        return false;
+    }
+
+    bool success = (WIFEXITED(status) && WEXITSTATUS(status) == 0);
     va_end(args);
-
-    return true;
+    return success;
 }
 
 /**
@@ -92,8 +137,31 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+    int kidpid;
+    bool success = false;
+    int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+    if (fd < 0) { 
+        perror("open"); abort(); 
+    }
+    
+    switch (kidpid = fork()) {
+        case -1: perror("fork"); abort();
+        case 0:
+            if (dup2(fd, 1) < 0) { perror("dup2"); abort(); }
+            close(fd);
+            execv(command[0], command);
+            _exit(EXIT_FAILURE);
+        default:
+            close(fd);
+            int status;
+            if (waitpid(kidpid, &status, 0) == -1) {
+                va_end(args);
+                return false;
+            }
+            success = (WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
 
     va_end(args);
 
-    return true;
+    return success;
 }
